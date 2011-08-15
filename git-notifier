@@ -8,6 +8,11 @@ import sys
 import subprocess
 import tempfile
 import time
+import re
+import smtplib
+from cStringIO import StringIO
+from email.MIMEText import MIMEText
+from email.MIMEMultipart import MIMEMultipart
 
 VERSION   = "0.3-13"  # Filled in automatically.
 
@@ -19,7 +24,7 @@ NoMail    = "[nomail]"
 
 gitolite = "GL_USER" in os.environ
 whoami = os.environ["LOGNAME"]
-sender = os.environ["GL_USER"] if gitolite else whoami
+sender = gitolite and os.environ["GL_USER"] or whoami
 
 Options = [
     # Name, argument, default, help,
@@ -41,7 +46,146 @@ Options = [
     ("replyto", True, None, "email address for reply-to header"),
     ]
 
-class State:
+class Mailer(object):
+    def __init__(self, smtp_host, smtp_port,
+                 sender, sender_password, recipients,ssl=False):
+        self.smtp_host = smtp_host
+        self.smtp_port = smtp_port
+        self.sender = sender or "git.noreply@acemetrix.com"
+        self.sender_password = sender_password
+        self.recipients = recipients
+        self.ssl = ssl
+
+    def send(self, subject, reply_to, message):
+        if not self.recipients:
+            return
+
+        mime_text = MIMEMultipart() 
+        mime_text['From'] = self.sender
+        mime_text['Reply-To'] = reply_to
+        mime_text['To'] = ', '.join(self.recipients)
+        mime_text['Subject'] = subject
+
+        mime_html = MIMEText(message, 'html') #, _charset='utf-8')
+
+        mime_text.attach(mime_html)
+        
+        server = smtplib.SMTP(self.smtp_host, self.smtp_port)
+        if self.ssl:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(self.sender, self.sender_password)
+
+        server.sendmail(self.sender, self.recipients, 
+                        mime_text.as_string())
+        print mime_text.as_string()
+        #server.rset()
+        server.quit()
+
+
+class Hunk(object):
+  """ Parses hunks starting with @@ -R +R @@ """
+
+  def __init__(self):
+    self.start_src=None 
+    self.lines_src=None
+    self.start_tgt=None
+    self.lines_tgt=None
+    self.invalid=False
+    self.text=[]
+
+  def append(self, line):
+      self.text.append(line)
+
+  def __str__(self):
+      return '\n'.join(self.text)      
+
+class Patch(object):
+
+  def __init__(self):
+    self.source = None 
+    self.target = None
+    self.hunks = []
+    self.hunkends = []
+    self.header = []
+    self.type = None
+
+CSSFILE_TEMPLATE = '''\
+td.linenos { background-color: #f0f0f0; padding-right: 10px; }
+span.lineno { background-color: #f0f0f0; padding: 0 5px 0 5px; }
+pre { line-height: 125%%; }
+body .gd { color: #000000; background-color: #ffdddd } /* Generic.Deleted */
+body .ge { font-style: italic } /* Generic.Emph */
+body .gr { color: #aa0000 } /* Generic.Error */
+body .gh { color: #999999 } /* Generic.Heading */
+body .gi { color: #000000; background-color: #ddffdd } /* Generic.Inserted */
+
+'''
+
+DOC_HEADER = '''\
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+
+<html>
+<head>
+  <title>title</title>
+  <meta http-equiv="content-type" content="text/html; charset=None">
+  <style type="text/css">
+''' + CSSFILE_TEMPLATE + '''
+  </style>
+</head>
+<body>
+<h2>title</h2>
+
+'''
+
+DOC_FOOTER = '''\
+</body>
+</html>
+'''
+
+class GitDiffParser(object):
+    def __init__(self):
+        pass
+
+    def parse(self, difftxt):
+        state = 'toplevel'
+        hunks = []
+        for line in difftxt.split('\n'):
+            if state == 'toplevel':
+                if line.startswith("@@"):
+                    state = 'hunk'
+                    new_hunk = Hunk()
+
+            if state == 'hunk':
+                if line.startswith("\ No newline at end of file"):
+                    state='toplevel'
+                    hunks.append(new_hunk)
+                else:
+                    new_hunk.append(line)
+        return hunks
+
+def patch2html(patch):
+    html = StringIO()
+    parser = GitDiffParser()
+    html.write(DOC_HEADER)
+    hucks = parser.parse(patch)
+    for h in hucks:
+        html.write("<pre><div>")
+        for line in h.text:
+            if line.startswith("-"):
+                html.write('<span class="gd">'+ line + "</span>\n")
+            elif line.startswith("+"):
+                html.write('<span class="gi">'+ line +"</span>\n")
+            else:
+                html.write('<span class="gh">'+ line +"</span>\n")
+        html.write("</div></pre>")
+
+    html.write(DOC_FOOTER)
+    return html.getvalue()
+
+class State(object):
     def __init__(self):
         self.clear()
 
@@ -70,11 +214,6 @@ class State:
 
         for rev in self.revs:
             print >>out, "rev", rev
-
-        # No longer used.
-        #
-        # for rev in self.diffs:
-        #     print >>out, "diff", rev
 
     def readFrom(self, file):
         self.clear()
@@ -110,6 +249,7 @@ class State:
 
 class GitConfig:
     def __init__(self, args):
+        self.use_sendmail = False
         self.parseArgs(args)
         self.maxdiffsize *= 1024 # KBytes to bytes.
 
@@ -142,11 +282,17 @@ class GitConfig:
                 defval = bool(defval)
 
             if not arg:
-                action = "store_true" if not default else "store_false"
+                if not default:
+                    action = "store_true"
+                else:
+                    action = "store_false"
                 parser.add_option("--%s" % name, action=action, dest=name, default=defval, help=help)
 
             else:
-                type = "string" if not isinstance(default, int) else "int"
+                if not isinstance(default, int):
+                    type = "string"
+                else:
+                    type = "int"
                 parser.add_option("--%s" % name, action="store", type=type, default=defval, dest=name, help=help)
 
         (options, args) = parser.parse_args(args)
@@ -172,7 +318,10 @@ class GitConfig:
 
     def _git_config(self, key, default):
         cfg = git(["config hooks.%s" % key])
-        return cfg[0] if cfg else default
+        if cfg:
+            return cfg[0]
+        else:
+            return default
 
 def log(msg):
     print >>Config.log, "%s - %s" % (time.asctime(), msg)
@@ -199,7 +348,10 @@ def git(args, stdout_to=subprocess.PIPE, all=False):
         error("cannot start git: %s" % str(e))
 
     if child.returncode != 0 and stderr:
-        msg = ": %s" % stderr if stderr else ""
+        if stderr:
+            msg = ": %s" % stderr
+        else:
+            msg = ""
         error("git child failed with exit code %d%s" % (child.returncode, msg))
 
     if stdout_to != subprocess.PIPE:
@@ -275,33 +427,42 @@ def generateMailHeader(subject):
 
     (out, fname) = makeTmp()
 
-    replyto = "Reply-To: %s\n" % Config.replyto if Config.replyto else ""
+    if Config.replyto:
+        replyto = "Reply-To: %s\n" % Config.replyto
+    else:
+        replyto = ""        
 
-    print >>out, """From: %s
-To: %s
-Subject: %s %s
-%sX-Git-Repository: %s
-X-Mailer: %s %s
+    email_header = False
+    if email_header:
+        print >>out, """From: %s
+    To: %s
+    Subject: %s %s
+    %sX-Git-Repository: %s
+    X-Mailer: %s %s
 
-%s
+    %s
 
-""" % (Config.sender, Config.mailinglist, Config.emailprefix, subject, replyto, repo,
-       Name, VERSION, mailTag("Repository", repo)),
+    """ % (Config.sender, Config.mailinglist, Config.emailprefix, subject, replyto, repo,
+           Name, VERSION, mailTag("Repository", repo)),
 
     return (out, fname)
 
 def sendMail(out, fname):
     out.close()
 
+    txtmail = open(fname).read()
+
     if Config.debug:
-        for line in open(fname):
-            print "    |", line,
-        print ""
-    else:
+        for line in txtmail.split("\n"):
+            print line
+
+    elif Config.use_sendmail:
         stdin = subprocess.Popen("/usr/sbin/sendmail -t", shell=True, stdin=subprocess.PIPE).stdin
-        for line in open(fname):
-            print >>stdin, line,
+        for line in txtmail.split("\n"):
+            print >>stdin, line
         stdin.close()
+    else:
+        mailer.send("git oun commit", "git.noreply@acemetrix.com", txtmail)
 
     # Wait a bit in case we're going to send more mails. Otherwise, the mails
     # get sent back-to-back and are likely to end up with identical timestamps,
@@ -334,14 +495,18 @@ def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
 
     (out, fname) = generateMailHeader(subject)
 
-    multi = "es" if len(heads) > 1 else ""
+    if len(heads) > 1:
+        multi = "es"
+    else:
+        multi = ""
+        
     heads = ",".join(heads)
 
-    print >>out, mailTag("On branch%s" % multi, heads)
+    #print >>out, mailTag("On branch%s" % multi, heads)
 
     if Config.link:
         url = Config.link.replace("%s", rev)
-        print >>out, mailTag("Link", url)
+        #print >>out, mailTag("Link", url)
 
     footer = ""
     show = git(show_cmd)
@@ -357,33 +522,40 @@ def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
         (tmp, tname) = makeTmp()
         diff = git(diff_cmd, stdout_to=tmp)
         tmp.close()
-
+        
         size = os.path.getsize(tname)
 
         if size > Config.maxdiffsize:
             footer = "\nDiff suppressed because of size. To see it, use:\n\n    git %s" % diff_cmd
             tname = None
 
-    print >>out, Separator
+    #print >>out, Separator
 
-    for line in git(show_cmd, all=True):
+    result = git(show_cmd, all=True)
+
+    for line in result:
         if line == "---":
-            print >>out, Separator
+            #print >>out, Separator
+            pass
         else:
-            print >>out, line
+            #print >>out, line
+            pass
 
-    print >>out, Separator
+    # print >>out, Separator
+
 
     if tname:
-        for line in open(tname):
-            print >>out, line,
+        data = open(tname).read()
+        txtfile = patch2html(data)
+        out.write(txtfile)
 
-    print >>out, footer
+    #print >>out, footer
 
     if Config.debug:
-        print >>out, "-- "
-        print >>out, "debug: show_cmd = git %s" % show_cmd
-        print >>out, "debug: diff_cmd = git %s" % diff_cmd
+        pass
+        #print >>out, "-- "
+        #print >>out, "debug: show_cmd = git %s" % show_cmd
+        #print >>out, "debug: diff_cmd = git %s" % diff_cmd
 
     sendMail(out, fname)
 
@@ -477,6 +649,48 @@ log("Running for %s" % os.getcwd())
 if Config.debug:
     for (name, arg, default, help) in Options:
         print >>sys.stderr, "[Option %s: %s]" % (name, Config.__dict__[name])
+
+MAILINGLIST = 'hooks.mailinglist'
+EMAILPREFIX = 'hooks.emailprefix'
+SMTP_SUBJECT = 'hooks.smtp-subject'
+SMTP_HOST = 'hooks.smtp-host'
+SMTP_PORT = 'hooks.smtp-port'
+SMTP_SENDER = 'hooks.smtp-sender'
+SMTP_SENDER_PASSWORD = 'hooks.smtp-sender-password'
+POST_RECEIVE_LOGFILE = 'hooks.post-receive-logfile'
+
+def git_config_get(name):
+    p = subprocess.Popen(['git', 'config', '--get', name], 
+                         stdout=subprocess.PIPE)
+    # Cut off the last \n character.
+    return p.stdout.read()[:-1]
+
+def get_config_variables():
+    def optional(variable):
+        config[variable] = git_config_get(variable)
+    def required(variable, type_=str):
+        v = git_config_get(variable)
+        if not v:
+            raise RuntimeError('This script needs %s to work.' % variable)
+        config[variable] = type_(v)
+    def recipients(variable):
+        v = git_config_get(variable)
+        config[variable] = [r for r in re.split(' *, *| +', v) if r]
+
+    config = {}
+    optional(EMAILPREFIX)
+    optional(SMTP_SUBJECT)
+    required(SMTP_HOST)
+    optional(SMTP_PORT)
+    optional(SMTP_SENDER)
+    optional(SMTP_SENDER_PASSWORD)
+    recipients(MAILINGLIST)
+    return config
+
+config = get_config_variables()
+mailer = Mailer(config[SMTP_HOST], config[SMTP_PORT],
+                            config[SMTP_SENDER], config[SMTP_SENDER_PASSWORD],
+                            config[MAILINGLIST])
 
 cache = State()
 
