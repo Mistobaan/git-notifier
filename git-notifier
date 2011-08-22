@@ -642,138 +642,139 @@ def headMoved(head, path):
 
     sendMail(out, fname)
 
-Config = GitConfig(sys.argv[1:])
+if __name__ == "__main__":
+    Config = GitConfig(sys.argv[1:])
 
-log("Running for %s" % os.getcwd())
+    log("Running for %s" % os.getcwd())
 
-if Config.debug:
-    for (name, arg, default, help) in Options:
-        print >>sys.stderr, "[Option %s: %s]" % (name, Config.__dict__[name])
+    if Config.debug:
+        for (name, arg, default, help) in Options:
+            print >>sys.stderr, "[Option %s: %s]" % (name, Config.__dict__[name])
 
-MAILINGLIST = 'hooks.mailinglist'
-EMAILPREFIX = 'hooks.emailprefix'
-SMTP_SUBJECT = 'hooks.smtp-subject'
-SMTP_HOST = 'hooks.smtp-host'
-SMTP_PORT = 'hooks.smtp-port'
-SMTP_SENDER = 'hooks.smtp-sender'
-SMTP_SENDER_PASSWORD = 'hooks.smtp-sender-password'
-POST_RECEIVE_LOGFILE = 'hooks.post-receive-logfile'
+    MAILINGLIST = 'hooks.mailinglist'
+    EMAILPREFIX = 'hooks.emailprefix'
+    SMTP_SUBJECT = 'hooks.smtp-subject'
+    SMTP_HOST = 'hooks.smtp-host'
+    SMTP_PORT = 'hooks.smtp-port'
+    SMTP_SENDER = 'hooks.smtp-sender'
+    SMTP_SENDER_PASSWORD = 'hooks.smtp-sender-password'
+    POST_RECEIVE_LOGFILE = 'hooks.post-receive-logfile'
 
-def git_config_get(name):
-    p = subprocess.Popen(['git', 'config', '--get', name], 
-                         stdout=subprocess.PIPE)
-    # Cut off the last \n character.
-    return p.stdout.read()[:-1]
+    def git_config_get(name):
+        p = subprocess.Popen(['git', 'config', '--get', name], 
+                             stdout=subprocess.PIPE)
+        # Cut off the last \n character.
+        return p.stdout.read()[:-1]
 
-def get_config_variables():
-    def optional(variable):
-        config[variable] = git_config_get(variable)
-    def required(variable, type_=str):
-        v = git_config_get(variable)
-        if not v:
-            raise RuntimeError('This script needs %s to work.' % variable)
-        config[variable] = type_(v)
-    def recipients(variable):
-        v = git_config_get(variable)
-        config[variable] = [r for r in re.split(' *, *| +', v) if r]
+    def get_config_variables():
+        def optional(variable):
+            config[variable] = git_config_get(variable)
+        def required(variable, type_=str):
+            v = git_config_get(variable)
+            if not v:
+                raise RuntimeError('This script needs %s to work.' % variable)
+            config[variable] = type_(v)
+        def recipients(variable):
+            v = git_config_get(variable)
+            config[variable] = [r for r in re.split(' *, *| +', v) if r]
 
-    config = {}
-    optional(EMAILPREFIX)
-    optional(SMTP_SUBJECT)
-    required(SMTP_HOST)
-    optional(SMTP_PORT)
-    optional(SMTP_SENDER)
-    optional(SMTP_SENDER_PASSWORD)
-    recipients(MAILINGLIST)
-    return config
+        config = {}
+        optional(EMAILPREFIX)
+        optional(SMTP_SUBJECT)
+        required(SMTP_HOST)
+        optional(SMTP_PORT)
+        optional(SMTP_SENDER)
+        optional(SMTP_SENDER_PASSWORD)
+        recipients(MAILINGLIST)
+        return config
 
-config = get_config_variables()
-mailer = Mailer(config[SMTP_HOST], config[SMTP_PORT],
-                            config[SMTP_SENDER], config[SMTP_SENDER_PASSWORD],
-                            config[MAILINGLIST])
+    config = get_config_variables()
+    mailer = Mailer(config[SMTP_HOST], config[SMTP_PORT],
+                                config[SMTP_SENDER], config[SMTP_SENDER_PASSWORD],
+                                config[MAILINGLIST])
 
-cache = State()
+    cache = State()
 
-if os.path.exists(CacheFile):
-    cache.readFrom(CacheFile)
-    report = (not Config.updateonly)
-else:
-    log("Initial run. Not generating any mails, just recording current state.")
-    report = False
-
-current = getCurrent()
-
-if Config.diff:
-    # Manual diff mode. The argument must be of the form "[old-rev..]new-rev".
-    path = [rev.strip() for rev in Config.diff.split("..")]
-    if len(path) == 1:
-        path = ("%s~2" % path[0], path[0]) # sic! ~2.
+    if os.path.exists(CacheFile):
+        cache.readFrom(CacheFile)
+        report = (not Config.updateonly)
     else:
-        path = ("%s~1" % path[0], path[1])
+        log("Initial run. Not generating any mails, just recording current state.")
+        report = False
 
-    revs = git(["rev-list", "--reverse --date-order", path[1], "^%s" % path[0]])
+    current = getCurrent()
 
-    diffPath("<manual-diff>", revs)
-
-    sys.exit(0)
-
-if Config.manual:
-    # Manual report mode. The argument must be of the form "[old-rev..]new-rev".
-    path = [rev.strip() for rev in Config.manual.split("..")]
-    if len(path) == 1:
-        path = ("%s~1" % path[0], path[0])
-
-    revs = git(["rev-list", "--reverse --date-order", path[1], "^%s" % path[0]])
-    reportPath(current, revs, force=True)
-
-    sys.exit(0)
-
-if report:
-    # Check for changes to the set of heads.
-    old = set(cache.heads.keys())
-    new = set(current.heads.keys())
-
-    for head in (new - old):
-        entryAdded("branch", head, current.heads[head])
-
-    for head in (old - new):
-        entryDeleted("branch", head)
-
-    stable_heads = new & old
-    Config.allchanges = Config.allchanges & stable_heads
-
-    # Check tags.
-    old = set(cache.tags.keys())
-    new = set(current.tags.keys())
-
-    for tag in (new - old):
-        entryAdded("tag", tag, current.tags[tag])
-
-    for tag in (old - new):
-        entryDeleted("tag", tag)
-
-    # Notify for unreported commits.
-    old = set(cache.revs)
-    new = set(current.revs)
-    new_revs = (new - old)
-    reportPath(current, new_revs)
-
-    # Do reports for the heads we want to see everything for.
-    for head in stable_heads:
-        old_rev = cache.heads[head]
-        new_rev = current.heads[head]
-        path = git(["rev-list", "--reverse --date-order", new_rev, "^%s" % old_rev])
-
-        if head in Config.allchanges:
-            # Want to see all commits for this head, even if already reported
-            # in the past for some other. So we record these separately.
-            reportPath(current, path, subject_head=head)
+    if Config.diff:
+        # Manual diff mode. The argument must be of the form "[old-rev..]new-rev".
+        path = [rev.strip() for rev in Config.diff.split("..")]
+        if len(path) == 1:
+            path = ("%s~2" % path[0], path[0]) # sic! ~2.
         else:
-            # Just send a summary for heads that now include some new stuff.
-            if len(set(path) - new_revs):
-                headMoved(head, path)
+            path = ("%s~1" % path[0], path[1])
 
-if not Config.noupdate:
-    current.writeTo(CacheFile)
+        revs = git(["rev-list", "--reverse --date-order", path[1], "^%s" % path[0]])
 
-deleteTmps()
+        diffPath("<manual-diff>", revs)
+
+        sys.exit(0)
+
+    if Config.manual:
+        # Manual report mode. The argument must be of the form "[old-rev..]new-rev".
+        path = [rev.strip() for rev in Config.manual.split("..")]
+        if len(path) == 1:
+            path = ("%s~1" % path[0], path[0])
+
+        revs = git(["rev-list", "--reverse --date-order", path[1], "^%s" % path[0]])
+        reportPath(current, revs, force=True)
+
+        sys.exit(0)
+
+    if report:
+        # Check for changes to the set of heads.
+        old = set(cache.heads.keys())
+        new = set(current.heads.keys())
+
+        for head in (new - old):
+            entryAdded("branch", head, current.heads[head])
+
+        for head in (old - new):
+            entryDeleted("branch", head)
+
+        stable_heads = new & old
+        Config.allchanges = Config.allchanges & stable_heads
+
+        # Check tags.
+        old = set(cache.tags.keys())
+        new = set(current.tags.keys())
+
+        for tag in (new - old):
+            entryAdded("tag", tag, current.tags[tag])
+
+        for tag in (old - new):
+            entryDeleted("tag", tag)
+
+        # Notify for unreported commits.
+        old = set(cache.revs)
+        new = set(current.revs)
+        new_revs = (new - old)
+        reportPath(current, new_revs)
+
+        # Do reports for the heads we want to see everything for.
+        for head in stable_heads:
+            old_rev = cache.heads[head]
+            new_rev = current.heads[head]
+            path = git(["rev-list", "--reverse --date-order", new_rev, "^%s" % old_rev])
+
+            if head in Config.allchanges:
+                # Want to see all commits for this head, even if already reported
+                # in the past for some other. So we record these separately.
+                reportPath(current, path, subject_head=head)
+            else:
+                # Just send a summary for heads that now include some new stuff.
+                if len(set(path) - new_revs):
+                    headMoved(head, path)
+
+    if not Config.noupdate:
+        current.writeTo(CacheFile)
+
+    deleteTmps()
