@@ -48,9 +48,7 @@ class Mailer(object):
 #        mime_text['To'] = ', '.join(self.recipients)
 #        mime_text['Subject'] = subject
 #
-#        mime_html = MIMEText(message, 'html') #, _charset='utf-8')
-#
-#        mime_text.attach(mime_html)
+
         
         server = smtplib.SMTP(self.smtp_host, self.smtp_port)
         if self.ssl:
@@ -325,7 +323,14 @@ class Mail(object):
             
     def addTag(self, key, value):
          self.mime_text["%-11s" % key] = value
-         
+    def attachHtml(self, html):
+        mime_html = MIMEText(message, 'html', _charset='utf-8')
+        self.mime_text.attach(mime_html)
+
+    def attachTxt(self, txt):
+        mime_html = MIMEText(message, 'plain')
+        self.mime_text.attach(mime_html)        
+        
     def __str__(self):
         return self.mime_text.as_string('UTF-8')
             
@@ -433,9 +438,9 @@ def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
 
     if tname:
         data = open(tname).read()
-        txtfile = patch2html(data, subject)
-        out.write(txtfile)
-
+        html = patch2html(data, subject)
+        mail.attachHtml(html)
+        mail.attachText(data)
     sendMail(mail)
 
 # Sends notification for a specific revision.
