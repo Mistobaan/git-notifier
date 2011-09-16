@@ -1,7 +1,29 @@
 import unittest
-
 import git_notifier
 
+diffexample = """
+diff --git a/scratchpad/gitnotifier.txt b/scratchpad/gitnotifier.txt
+index a9867a2..86e310e 100644
+--- a/scratchpad/gitnotifier.txt
++++ b/scratchpad/gitnotifier.txt
+@@ -1,5 +1,2 @@
+ test test
+-more edits
+-and diffs 
+-and here
+ some more..
+"""
+class TestGitParser(unittest.TestCase):
+    
+    def test_example1(self):
+        parser = git_notifier.GitDiffParser()
+        hunks = parser.parse(diffexample)
+        self.assertEquals(1,len(hunks))
+        
+    def test_parse(self):
+        html = git_notifier.patch2html(diffexample)
+        self.assertTrue(html)
+        
 class FakeProvider(object):
 
     def get(self, varname):
@@ -54,6 +76,3 @@ class TestMail(unittest.TestCase):
         cfg.get_config_variables() 
         cfg.parseArgs([])
         git_notifier.generateMailHeader(cfg,"Subject")
-
-if __name__ == '__main__':
-    unittest.main()

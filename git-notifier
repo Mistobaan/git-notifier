@@ -95,14 +95,15 @@ DOC_HEADER = '''\
 
 <html>
 <head>
-  <title>%{title}</title>
+  <title>%(title)s</title>
   <meta http-equiv="content-type" content="text/html; charset=None">
   <style type="text/css">
 ''' + CSSFILE_TEMPLATE + '''
   </style>
 </head>
 <body>
-<h2>%{title}</h2>
+<h1>%(title)s</h1>
+<h2>On Branch: %(heads)s </h2>
 
 '''
 
@@ -118,6 +119,7 @@ class GitDiffParser(object):
     def parse(self, difftxt):
         state = 'toplevel'
         hunks = []
+        new_hunk = None 
         for line in difftxt.split('\n'):
             if state == 'toplevel':
                 if line.startswith("@@"):
@@ -128,11 +130,14 @@ class GitDiffParser(object):
                 if line.startswith("\ No newline at end of file"):
                     state='toplevel'
                     hunks.append(new_hunk)
+                    new_hunk = None 
                 else:
                     new_hunk.append(line)
+        if not (new_hunk is None):
+            hunks.append(new_hunk) 
         return hunks
 
-def patch2html(patch, title='No title set'):
+def patch2html(patch, title='No title set', heads=''):
     html = StringIO()
     parser = GitDiffParser()
     html.write(DOC_HEADER % locals())
@@ -299,9 +304,6 @@ def deleteTmps():
     for tmp in Tmps:
         os.unlink(tmp)
 
-def mailTag(key, value):
-    return "%-11s" % (key, value)
-
 class Mail(object):
 
     def __init__(self, sender, recipients, subject, reply_to, mailer):
@@ -315,13 +317,13 @@ class Mail(object):
     def addTag(self, key, value):
          self.mime_text["%-11s" % key] = value
          
-    def attachHtml(self, html):
-        mime_html = MIMEText(message, 'html', _charset='utf-8')
+    def attachHtml(self, message):
+        mime_html = MIMEText(message, 'html')
         self.mime_text.attach(mime_html)
 
-    def attachTxt(self, txt):
-        mime_html = MIMEText(message, 'plain')
-        self.mime_text.attach(mime_html)        
+    def attachText(self, message):
+        mime_text = MIMEText(message, 'plain')
+        self.mime_text.attach(mime_text)
         
     def __str__(self):
         return self.mime_text.as_string()
@@ -399,8 +401,6 @@ def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
         
     heads = ",".join(heads)
 
-    mail.addTag("On branch%s" % multi, heads)
-
     if Config.link:
         url = Config.link.replace("%s", rev)
         mail.addTag("Link", url)
@@ -430,9 +430,17 @@ def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
 
     if tname:
         data = open(tname).read()
-        html = patch2html(data, subject)
+        html = patch2html(data, title=subject, heads=heads)
         mail.attachHtml(html)
-
+        mail.attachText(data + "\n\n\n" + show_cmd + '\n' + diff_cmd + '\n' + footer)
+    else:
+        mail.attachText(show_cmd + '\n' + diff_cmd + '\n' + footer)
+    	
+    if Config.debug:
+        print >>out, "-- "
+        print >>out, "debug: show_cmd = git %s" % show_cmd
+        print >>out, "debug: diff_cmd = git %s" % diff_cmd
+        
     sendMail(mail)
 
 # Sends notification for a specific revision.
@@ -553,7 +561,7 @@ class GitNotifierConfig(object):
     ("log", True, "%s.log" % Name, "set log output"),
     ("mailinglist", True, whoami, "destination address for mails"),
     ("manual", True, None, "notifiy for a manually given set of revisions"),
-    ("maxdiffsize", True, 50, "limit the size of diffs in mails (KB)"),
+    ("maxdiffsize", True, ONE_MB_IN_BYTES, "limit the size of diffs in mails (KB)"),
     ("noupdate", False, False, "do not update the state file"),
     ("repouri", True, None, "full URI for the repository"),
     ("sender", True, sender, "sender address for mails"),
