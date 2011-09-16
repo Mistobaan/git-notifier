@@ -39,16 +39,6 @@ class Mailer(object):
         self.ssl = ssl
 
     def send(self, sender, recipients, message):
-        if not self.recipients:            
-            return
-
-#        mime_text = MIMEMultipart() 
-#        mime_text['From'] = self.sender
-#        mime_text['Reply-To'] = reply_to
-#        mime_text['To'] = ', '.join(self.recipients)
-#        mime_text['Subject'] = subject
-#
-
         
         server = smtplib.SMTP(self.smtp_host, self.smtp_port)
         if self.ssl:
@@ -57,6 +47,7 @@ class Mailer(object):
             server.ehlo()
             server.login(self.sender, self.sender_password)
 
+        log("Sending email to %s " % self.recipients)
         server.sendmail(self.sender, self.recipients, message)
         server.quit()
 
@@ -323,6 +314,7 @@ class Mail(object):
             
     def addTag(self, key, value):
          self.mime_text["%-11s" % key] = value
+         
     def attachHtml(self, html):
         mime_html = MIMEText(message, 'html', _charset='utf-8')
         self.mime_text.attach(mime_html)
@@ -332,7 +324,7 @@ class Mail(object):
         self.mime_text.attach(mime_html)        
         
     def __str__(self):
-        return self.mime_text.as_string('UTF-8')
+        return self.mime_text.as_string()
             
 def generateMailHeader(cfg, subject):
 
@@ -440,7 +432,7 @@ def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
         data = open(tname).read()
         html = patch2html(data, subject)
         mail.attachHtml(html)
-        mail.attachText(data)
+
     sendMail(mail)
 
 # Sends notification for a specific revision.
@@ -602,8 +594,8 @@ class GitNotifierConfig(object):
         self.optional(SMTP_PORT)
         self.optional(SMTP_SENDER)
         self.optional(SMTP_SENDER_PASSWORD)
-        self.recipients = self.parse_emails(MAILINGLIST)
-        self._config[MAILINGLIST] = self.recipients
+        self.required(MAILINGLIST)
+        self.recipients = self._config[MAILINGLIST]
         return self
 
     def load_args(self, args):
