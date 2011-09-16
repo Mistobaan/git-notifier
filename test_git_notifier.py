@@ -13,7 +13,7 @@ class FakeProvider(object):
 class TestConfig(unittest.TestCase):
 
     def setUp(self):
-        self.cfg = git_notifier.Config(FakeProvider())
+        self.cfg = git_notifier.GitNotifierConfig(FakeProvider())
 
     def test_config_required(self):
         self.assertRaisesRegexp( git_notifier.ConfigValueError,
@@ -43,6 +43,17 @@ class TestConfig(unittest.TestCase):
         input = "myemail@domain.com other@domain.com"
         self.assertSplitEmails(input, expected)
 
+
+class TestMail(unittest.TestCase):
+
+    def get(self, key):        
+        return "some_value"
+    
+    def test_mail_creation(self):
+        cfg = git_notifier.GitNotifierConfig(self)
+        cfg.get_config_variables() 
+        cfg.parseArgs([])
+        git_notifier.generateMailHeader(cfg,"Subject")
 
 if __name__ == '__main__':
     unittest.main()

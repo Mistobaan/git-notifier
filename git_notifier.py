@@ -26,7 +26,7 @@ gitolite = "GL_USER" in os.environ
 whoami = os.environ["LOGNAME"]
 sender = gitolite and os.environ["GL_USER"] or whoami
 
-
+Config = None
 
 class Mailer(object):
     def __init__(self, smtp_host, smtp_port,
@@ -38,19 +38,19 @@ class Mailer(object):
         self.recipients = recipients
         self.ssl = ssl
 
-    def send(self, subject, reply_to, message):
-        if not self.recipients:
+    def send(self, sender, recipients, message):
+        if not self.recipients:            
             return
 
-        mime_text = MIMEMultipart() 
-        mime_text['From'] = self.sender
-        mime_text['Reply-To'] = reply_to
-        mime_text['To'] = ', '.join(self.recipients)
-        mime_text['Subject'] = subject
-
-        mime_html = MIMEText(message, 'html') #, _charset='utf-8')
-
-        mime_text.attach(mime_html)
+#        mime_text = MIMEMultipart() 
+#        mime_text['From'] = self.sender
+#        mime_text['Reply-To'] = reply_to
+#        mime_text['To'] = ', '.join(self.recipients)
+#        mime_text['Subject'] = subject
+#
+#        mime_html = MIMEText(message, 'html') #, _charset='utf-8')
+#
+#        mime_text.attach(mime_html)
         
         server = smtplib.SMTP(self.smtp_host, self.smtp_port)
         if self.ssl:
@@ -59,8 +59,7 @@ class Mailer(object):
             server.ehlo()
             server.login(self.sender, self.sender_password)
 
-        server.sendmail(self.sender, self.recipients, 
-                        mime_text.as_string())
+        server.sendmail(self.sender, self.recipients, message)
         server.quit()
 
 class Hunk(object):
@@ -107,14 +106,14 @@ DOC_HEADER = '''\
 
 <html>
 <head>
-  <title>title</title>
+  <title>%{title}</title>
   <meta http-equiv="content-type" content="text/html; charset=None">
   <style type="text/css">
 ''' + CSSFILE_TEMPLATE + '''
   </style>
 </head>
 <body>
-<h2>title</h2>
+<h2>%{title}</h2>
 
 '''
 
@@ -144,10 +143,10 @@ class GitDiffParser(object):
                     new_hunk.append(line)
         return hunks
 
-def patch2html(patch):
+def patch2html(patch, title='No title set'):
     html = StringIO()
     parser = GitDiffParser()
-    html.write(DOC_HEADER)
+    html.write(DOC_HEADER % locals())
     hucks = parser.parse(patch)
     for h in hucks:
         html.write("<pre><div>")
@@ -312,62 +311,58 @@ def deleteTmps():
         os.unlink(tmp)
 
 def mailTag(key, value):
-    return "%-11s: %s" % (key, value)
+    return "%-11s" % (key, value)
 
-def generateMailHeader(subject):
+class Mail(object):
 
-    repo = Config.repouri
+    def __init__(self, sender, recipients, subject, reply_to, mailer):
+        self.mime_text = mime_text = MIMEMultipart() 
+        self.sender = mime_text['From'] = sender
+        self.reply_to = mime_text['Reply-To'] = reply_to
+        self.recipients = mime_text['To'] = recipients
+        mime_text['Subject'] = subject
+        mime_text['X-Mailer'] = mailer
+            
+    def addTag(self, key, value):
+         self.mime_text["%-11s" % key] = value
+         
+    def __str__(self):
+        return self.mime_text.as_string('UTF-8')
+            
+def generateMailHeader(cfg, subject):
 
+    repo = cfg.repouri
+    
     if not repo:
 
         if gitolite:
             # Gitolite version.
-            repo = "ssh://%s@%s/%s" % (whoami, Config.hostname, os.path.basename(os.getcwd()))
+            repo = "ssh://%s@%s/%s" % (whoami, cfg.hostname, os.path.basename(os.getcwd()))
         else:
             # Standard version.
-            repo = "ssh://%s/%s" % (Config.hostname, os.path.basename(os.getcwd()))
+            repo = "ssh://%s/%s" % (cfg.hostname, os.path.basename(os.getcwd()))
 
         if repo.endswith(".git"):
             repo = repo[0:-4]
 
-    (out, fname) = makeTmp()
+    replyto = cfg.replyto
+    final_subject = "%s %s" % (cfg.emailprefix,subject)
+    replyto = "%sX-Git-Repository: %s" % (replyto, repo)
+    mailer = "%s %s" % (Name, VERSION)
+    mail = Mail(cfg.sender, cfg.mailinglist, final_subject, replyto, mailer)
+    mail.addTag("Repository", repo) 
+    return mail
 
-    if Config.replyto:
-        replyto = "Reply-To: %s\n" % Config.replyto
-    else:
-        replyto = ""        
-
-    email_header = False
-    if email_header:
-        print >>out, """From: %s
-    To: %s
-    Subject: %s %s
-    %sX-Git-Repository: %s
-    X-Mailer: %s %s
-
-    %s
-
-    """ % (Config.sender, Config.mailinglist, Config.emailprefix, subject, replyto, repo,
-           Name, VERSION, mailTag("Repository", repo)),
-
-    return (out, fname)
-
-def sendMail(out, fname):
-    out.close()
-
-    txtmail = open(fname).read()
-
+def sendMail(mail):
     if Config.debug:
-        for line in txtmail.split("\n"):
-            print line
+        print str(mail)
 
     elif Config.use_sendmail:
         stdin = subprocess.Popen("/usr/sbin/sendmail -t", shell=True, stdin=subprocess.PIPE).stdin
-        for line in txtmail.split("\n"):
-            print >>stdin, line
+        print >>stdin, str(mail),
         stdin.close()
     else:
-        mailer.send("git oun commit", "git.noreply@acemetrix.com", txtmail)
+        mailer.send( mail.sender, mail.recipients, str(mail) )
 
     # Wait a bit in case we're going to send more mails. Otherwise, the mails
     # get sent back-to-back and are likely to end up with identical timestamps,
@@ -378,27 +373,27 @@ def sendMail(out, fname):
 def entryAdded(key, value, rev):
     log("New %s %s" % (key, value))
 
-    (out, fname) = generateMailHeader("%s '%s' created" % (key, value))
+    mail = generateMailHeader(Config, "%s '%s' created" % (key, value))
 
-    print >>out, mailTag("New %s" % key, value)
-    print >>out, mailTag("Referencing", rev)
+    mail.addTag("New %s" % key, value)
+    mail.addTag("Referencing", rev)
 
-    sendMail(out, fname)
+    sendMail(mail)
 
 def entryDeleted(key, value):
     log("Deleted %s %s" % (key, value))
 
-    (out, fname) = generateMailHeader("%s '%s' deleted" % (key, value))
+    mail = generateMailHeader(Config, "%s '%s' deleted" % (key, value))
 
-    print >>out, mailTag("Deleted %s" % key, value)
+    mail.addTag("Deleted %s" % key, value)
 
-    sendMail(out, fname)
+    sendMail(mail)
 
 # Sends a mail for a notification consistent of two parts: (1) the output of a
 # show command, and (2) the output of a diff command.
 def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
 
-    (out, fname) = generateMailHeader(subject)
+    mail = generateMailHeader(Config, subject)
 
     if len(heads) > 1:
         multi = "es"
@@ -407,11 +402,11 @@ def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
         
     heads = ",".join(heads)
 
-    #print >>out, mailTag("On branch%s" % multi, heads)
+    mail.addTag("On branch%s" % multi, heads)
 
     if Config.link:
         url = Config.link.replace("%s", rev)
-        #print >>out, mailTag("Link", url)
+        mail.addTag("Link", url)
 
     footer = ""
     show = git(show_cmd)
@@ -434,35 +429,14 @@ def sendChangeMail(rev, subject, heads, show_cmd, diff_cmd):
             footer = "\nDiff suppressed because of size. To see it, use:\n\n    git %s" % diff_cmd
             tname = None
 
-    #print >>out, Separator
-
     result = git(show_cmd, all=True)
-
-    for line in result:
-        if line == "---":
-            #print >>out, Separator
-            pass
-        else:
-            #print >>out, line
-            pass
-
-    # print >>out, Separator
-
 
     if tname:
         data = open(tname).read()
-        txtfile = patch2html(data)
+        txtfile = patch2html(data, subject)
         out.write(txtfile)
 
-    #print >>out, footer
-
-    if Config.debug:
-        pass
-        #print >>out, "-- "
-        #print >>out, "debug: show_cmd = git %s" % show_cmd
-        #print >>out, "debug: diff_cmd = git %s" % diff_cmd
-
-    sendMail(out, fname)
+    sendMail(mail)
 
 # Sends notification for a specific revision.
 def commit(current, rev, force=False, subject_head=None):
@@ -537,7 +511,7 @@ def headMoved(head, path):
 
     subject = git("show '--pretty=format:%%s (%%h)' -s %s" % path[-1])
 
-    (out, fname) = generateMailHeader("%s's head updated: %s" % (head, subject[0]))
+    mail = generateMailHeader(Config, "%s's head updated: %s" % (head, subject[0]))
 
     print >>out, "Branch '%s' now includes:" % head
     print >>out, ""
@@ -545,7 +519,7 @@ def headMoved(head, path):
     for rev in path:
         print >>out, "    ", git("show -s --pretty=oneline --abbrev-commit %s" % rev)[0]
 
-    sendMail(out, fname)
+    sendMail(mail)
 
 MAILINGLIST = 'hooks.mailinglist'
 EMAILPREFIX = 'hooks.emailprefix'
@@ -569,7 +543,7 @@ class GitConfigProvider(object):
 
 ONE_MB_IN_BYTES = 1048576
 
-class Config(object):
+class GitNotifierConfig(object):
     email_regexp = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}$")
 
     Options = [
@@ -591,7 +565,7 @@ class Config(object):
     ("users", True, None, "location of a user-to-email mapping file"),
     ("replyto", True, None, "email address for reply-to header"),
     ]
-    
+            
     def __init__(self, provider):
         self._provider = provider
         self._config = {}
@@ -623,9 +597,9 @@ class Config(object):
         self.optional(SMTP_PORT)
         self.optional(SMTP_SENDER)
         self.optional(SMTP_SENDER_PASSWORD)
-        self.recipients(MAILINGLIST)
-        self.parse_emails()
-        return config
+        self.recipients = self.parse_emails(MAILINGLIST)
+        self._config[MAILINGLIST] = self.recipients
+        return self
 
     def load_args(self, args):
 
@@ -650,7 +624,7 @@ class Config(object):
 
         parser = optparse.OptionParser(version=VERSION)
 
-        for (name, arg, default, help) in Options:
+        for (name, arg, default, help) in self.Options:
             defval = self._git_config(name, default)
 
             if isinstance(default, int):
@@ -678,7 +652,7 @@ class Config(object):
         if len(args) != 0:
             parser.error("incorrect number of arguments")
 
-        for (name, arg, default, help) in Options:
+        for (name, arg, default, help) in self.Options:
             self.__dict__[name] = options.__dict__[name]
 
     def readUsers(self):
@@ -701,18 +675,17 @@ class Config(object):
         else:
             return default
 
-
 if __name__ == "__main__":
+    Config = config = GitNotifierConfig(GitConfigProvider())
+    config.load_args(sys.argv[1:])
+    config.get_config_variables()
+        
     log("Running for %s" % os.getcwd())
 
     if Config.debug:
-        for (name, arg, default, help) in Options:
+        for (name, arg, default, help) in Config.Options:
             print >>sys.stderr, "[Option %s: %s]" % (name, Config.__dict__[name])
-
-    config = Config()
-    config.get_config_variables()
-    config.get_args(sys.argv[1:])
-    
+   
     mailer = Mailer(config[SMTP_HOST], config[SMTP_PORT],
                     config[SMTP_SENDER], config[SMTP_SENDER_PASSWORD],
                     config[MAILINGLIST])

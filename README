@@ -251,3 +251,18 @@ License
 -------
 
 ``git-notifier`` comes with a BSD-style licence.
+
+
+References
+------
+There are some other tools in other languages that provides basic html notify
+
+* Perl
+  http://source.winehq.org/git/tools.git/?a=blob;f=git-notify;hb=HEAD
+
+* Ruby
+   https://github.com/Simbul/git-mail-notifier
+   https://github.com/bitboxer/git-commit-notifier
+
+* Python
+   
